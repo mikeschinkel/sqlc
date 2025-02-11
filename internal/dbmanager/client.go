@@ -19,6 +19,7 @@ import (
 type CreateDatabaseRequest struct {
 	Engine     string
 	Migrations []string
+	Prefix     string
 }
 
 type CreateDatabaseResponse struct {
@@ -48,11 +49,25 @@ func dbid(migrations []string) string {
 
 func (m *ManagedClient) CreateDatabase(ctx context.Context, req *CreateDatabaseRequest) (*CreateDatabaseResponse, error) {
 	hash := dbid(req.Migrations)
-	name := fmt.Sprintf("sqlc_managed_%s", hash)
+	prefix := req.Prefix
+	if prefix == "" {
+		prefix = "sqlc_managed"
+	}
+	name := fmt.Sprintf("%s_%s", prefix, hash)
+
+	engine := config.Engine(req.Engine)
+	switch engine {
+	case config.EngineMySQL:
+		// pass
+	case config.EnginePostgreSQL:
+		// pass
+	default:
+		return nil, fmt.Errorf("unsupported engine: %s", engine)
+	}
 
 	var base string
 	for _, server := range m.servers {
-		if server.Engine == config.EnginePostgreSQL {
+		if server.Engine == engine {
 			base = server.URI
 			break
 		}
@@ -72,7 +87,7 @@ func (m *ManagedClient) CreateDatabase(ctx context.Context, req *CreateDatabaseR
 	if err != nil {
 		return nil, err
 	}
-	uri.Path = name
+	uri.Path = "/" + name
 
 	key := uri.String()
 	_, err, _ = flight.Do(key, func() (interface{}, error) {
@@ -91,6 +106,7 @@ func (m *ManagedClient) CreateDatabase(ctx context.Context, req *CreateDatabaseR
 
 		conn, err := pgx.Connect(ctx, uri.String())
 		if err != nil {
+			pool.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS "%s" WITH (FORCE)`, name))
 			return nil, fmt.Errorf("connect %s: %s", name, err)
 		}
 		defer conn.Close(ctx)
@@ -107,7 +123,7 @@ func (m *ManagedClient) CreateDatabase(ctx context.Context, req *CreateDatabaseR
 		}
 
 		if migrationErr != nil {
-			pool.Exec(ctx, fmt.Sprintf(`DROP DATABASE "%s" IF EXISTS WITH (FORCE)`, name))
+			pool.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS "%s" WITH (FORCE)`, name))
 			return nil, migrationErr
 		}
 
